@@ -23,10 +23,12 @@ const client = new MongoClient(uri, {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     const usersCollection = client.db('Blood-wave').collection('users')
     const bloodRequestCollection = client.db('Blood-wave').collection('blood-request')
+    const taskCollection = client.db('Blood-wave').collection('task')
+    const completedTaskCollection = client.db('Blood-wave').collection('completed-task')
 
 
 
@@ -285,19 +287,40 @@ async function run() {
 
     app.patch('/blood-requests/:id', verifyToken, verifyDonor, async(req, res)=>{
       const id = req.params.id;
-      const {status} = req.body;
+      const {status, donorId} = req.body;
       if (!status || !['pending', 'accepted', 'rejected'].includes(status)) {
         return res.status(400).send({ error: 'Invalid status value' });
       }
       const filter = {_id: new ObjectId(id)};
-      const updateDoc = {$set:{status:status}};
-      const result = await bloodRequestCollection.updateOne(filter, updateDoc);
-      res.send(result)
+      const updateFields = {   status, statusTime: new Date() };
+      const updateDoc = {$set:updateFields};
+      const requestUpdateResult  = await bloodRequestCollection.updateOne(filter, updateDoc);
+
+      if(status === 'accepted' && donorId){
+        await usersCollection.updateOne(
+          {_id:new ObjectId(donorId)}, 
+          {$set:{availability:"unavailable"}}
+        );
+
+        await taskCollection.deleteMany({donorId:new ObjectId(donorId)});
+
+        const donorData = await usersCollection.findOne({_id: new ObjectId(donorId)});
+
+        await taskCollection.insertOne({
+          donorId: donorData._id,
+          name: donorData.name,
+          email: donorData.email,
+          bloodRequestId: id,
+          acceptedAt: new Date(),
+          status: "pending"
+        });
+      }
+      res.send({ message: 'Blood request updated', requestUpdateResult });
     })
 
     app.get('/blood-requests/donor/status', verifyToken, verifyDonor, async (req, res) => {
       const userEmail = req.query.email;
-      const query = {reciveremail: userEmail, status:{$in:['accepted', 'rejected']}}
+      const query = {reciveremail: userEmail}
       // console.log(userEmail)
       const requests = await bloodRequestCollection.find(query).toArray();
       // console.log(requests);
@@ -305,14 +328,74 @@ async function run() {
     });
 
 
+    // this is for Task page
+    app.get('/task/:email', verifyToken, verifyDonor, async(req, res)=>{
+      const email = req.params.email;
+      const filter = {email: email}
+      const result = await taskCollection.findOne(filter);
+      res.send(result)
+    })
+    // this is for Task page
+    app.get('/request/:id',verifyToken, verifyDonor, async(req, res)=>{
+      const id = req.params.id;
+      const filter = {_id:new ObjectId(id)}
+      const result = await bloodRequestCollection.findOne(filter);
+      res.send(result)
+    })
 
 
+    // For completed Task after click complete btn
+    app.patch('/task/complete/:id', verifyToken, verifyDonor, async(req, res)=>{
+      const id = req.params.id;
+      const {donorId, requestId } = req.body;
+
+      if (!donorId || !requestId) {
+        return res.status(400).send({ error: 'donorId and requestId required' });
+      }
+
+      const taskUpdateResult  = await taskCollection.updateOne(
+        {_id: new ObjectId(id)},
+        {$set:{status: 'completed', completedAt: new Date()}}
+      );
+
+      const userUpdateResult = await usersCollection.updateOne(
+        { _id: new ObjectId(donorId) },
+        { $set: { availability: 'available' } }
+      );
+
+      const taskData = await taskCollection.findOne({_id: new ObjectId(id)});
+      const requestData = await bloodRequestCollection.findOne({_id: new ObjectId(requestId)});
+
+      await completedTaskCollection.insertOne({
+        ...taskData,
+        requestDetails: requestData,
+        completedAt: new Date(),
+      })
+
+      await taskCollection.deleteOne({_id: new ObjectId(id)});
+
+      res.send({
+        message: 'Task completed and donor availability updated',
+        taskUpdateResult,
+        userUpdateResult
+      });
+
+    });
+
+    // For my completed task page
+    app.get("/mytask/completed/:email", verifyToken, verifyDonor, async(req, res)=>{
+      const email = req.params.email;
+      // console.log(email);
+      const filter = {email: email};
+      const result = await completedTaskCollection.find(filter).toArray();
+      res.send(result);
+    })
 
 
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // await client.db("admin").command({ ping: 1 });
+    // console.log("Pinged your deployment. You successfully connected to MongoDB!");
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
