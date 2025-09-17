@@ -26,6 +26,9 @@ async function run() {
     // await client.connect();
 
     const usersCollection = client.db("Blood-wave").collection("users");
+    const newsletterCollection = client
+      .db("Blood-wave")
+      .collection("newsletter");
     const bloodRequestCollection = client
       .db("Blood-wave")
       .collection("blood-request");
@@ -153,6 +156,20 @@ async function run() {
       res.send(result);
     });
 
+    // Get completed blood requests for a member
+    app.get("/bloodRecive/completed/:email", async (req, res) => {
+      const memberEmail = req.params.email;
+
+      const member = await usersCollection.findOne({ email: memberEmail });
+      if (!member) return res.status(404).send({ error: "Member not found" });
+
+      const completedRequests = await completedTaskCollection
+        .find({ "requestDetails.senderid": member._id.toString() })
+        .toArray();
+
+      res.send(completedRequests);
+    });
+
     // donor howar jonno data update
     app.patch("/users/user/become-donor/:id", async (req, res) => {
       const id = req.params.id;
@@ -202,7 +219,8 @@ async function run() {
       const totalUser = await usersCollection.countDocuments();
       const donor = await usersCollection.countDocuments(query);
       const activeDonor = await usersCollection.countDocuments(query2);
-      res.send({ totalUser, donor, activeDonor });
+      const totalBloodReq = await bloodRequestCollection.countDocuments();
+      res.send({ totalUser, donor, activeDonor, totalBloodReq });
     });
 
     // get singleUser by email for Profile page
@@ -266,7 +284,58 @@ async function run() {
       verifyToken,
       verifyAdmin,
       async (req, res) => {
-        const donors = await usersCollection.find({ role: "donor" }).toArray();
+        const donors = await usersCollection
+          .aggregate([
+            { $match: { role: "donor" } },
+            {
+              $lookup: {
+                from: "blood-request",
+                let: { donorId: { $toString: "$_id" } }, // convert ObjectId to string
+                pipeline: [
+                  { $match: { $expr: { $eq: ["$reciverid", "$$donorId"] } } },
+                ],
+                as: "requests",
+              },
+            },
+            {
+              $addFields: {
+                totalRequest: { $size: "$requests" },
+                pendingRequest: {
+                  $size: {
+                    $filter: {
+                      input: "$requests",
+                      as: "r",
+                      cond: { $eq: ["$$r.status", "pending"] },
+                    },
+                  },
+                },
+                acceptedRequests: {
+                  $size: {
+                    $filter: {
+                      input: "$requests",
+                      as: "r",
+                      cond: { $eq: ["$$r.status", "accepted"] },
+                    },
+                  },
+                },
+                rejectedRequests: {
+                  $size: {
+                    $filter: {
+                      input: "$requests",
+                      as: "r",
+                      cond: { $eq: ["$$r.status", "rejected"] },
+                    },
+                  },
+                },
+              },
+            },
+            {
+              $project: {
+                requests: 0, // hide request details
+              },
+            },
+          ])
+          .toArray();
         res.send(donors);
       }
     );
@@ -433,7 +502,7 @@ async function run() {
 
         const userUpdateResult = await usersCollection.updateOne(
           { _id: new ObjectId(donorId) },
-          { $set: { availability: "available" } }
+          { $set: { availability: "available", lastDonation: new Date() } }
         );
 
         const taskData = await taskCollection.findOne({
@@ -472,6 +541,92 @@ async function run() {
         res.send(result);
       }
     );
+
+    // for admin -->  all completed blood donation
+    app.get(
+      "/admin/allCompletedBloodDonation",
+      verifyToken,
+      verifyAdmin,
+      async (req, res) => {
+        const result = await completedTaskCollection.find().toArray();
+        res.send(result);
+      }
+    );
+
+    app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
+      const totalUser = await usersCollection.countDocuments();
+      const totalAdmin = await usersCollection.countDocuments({
+        role: "admin",
+      });
+      const totalDonor = await usersCollection.countDocuments({
+        role: "donor",
+      });
+      const totalMember = await usersCollection.countDocuments({
+        role: "member",
+      });
+      const activeUser = await usersCollection.countDocuments({
+        status: "active",
+      });
+      const blockedUser = await usersCollection.countDocuments({
+        status: "blocked",
+      });
+
+      const activeDonor = await usersCollection.countDocuments({
+        role: "donor",
+        status: "active",
+        availability: "available",
+      });
+      const unavailableDonor = await usersCollection.countDocuments({
+        role: "donor",
+        availability: "unavailable",
+      });
+
+      const totalBloodReq = await bloodRequestCollection.countDocuments();
+      const pendingRequest = await bloodRequestCollection.countDocuments({
+        status: "pending",
+      });
+      const acceptedRequest = await bloodRequestCollection.countDocuments({
+        status: "accepted",
+      });
+      const rejectedRequest = await bloodRequestCollection.countDocuments({
+        status: "rejected",
+      });
+
+      const totalTaskAssigned = await taskCollection.countDocuments();
+      const completedTask = await completedTaskCollection.countDocuments();
+
+      res.send({
+        totalUser,
+        totalAdmin,
+        totalDonor,
+        totalMember,
+        activeUser,
+        blockedUser,
+        activeDonor,
+        unavailableDonor,
+        totalBloodReq,
+        pendingRequest,
+        acceptedRequest,
+        rejectedRequest,
+        totalTaskAssigned,
+        completedTask,
+      });
+    });
+
+    // POST /newsletter
+    app.post("/newsletter", async (req, res) => {
+      const { email } = req.body;
+      if (!email) return res.status(400).send({ error: "Email is required" });
+
+      const existing = await newsletterCollection.findOne({ email });
+      if (existing) return res.send({ message: "Already subscribed" });
+
+      const result = await newsletterCollection.insertOne({
+        email,
+        createdAt: new Date(),
+      });
+      res.send({ message: "Subscribed successfully!", data: result });
+    });
 
     // Send a ping to confirm a successful connection
     // await client.db("admin").command({ ping: 1 });
